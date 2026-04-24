@@ -33,39 +33,73 @@ def clean_text(text):
 
 @st.cache_resource
 def load_and_train():
+    # Load dataset
     df = pd.read_csv('spam.csv', encoding='latin-1')[['v1', 'v2']]
     df.columns = ['label', 'message']
     df['label_num'] = df['label'].map({'ham': 0, 'spam': 1})
     df['cleaned'] = df['message'].apply(clean_text)
-
+    
+    # Feature extraction
     tfidf = TfidfVectorizer(max_features=3000)
     X = tfidf.fit_transform(df['cleaned'])
     y = df['label_num']
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
-
+    
+    # EXPLICIT TRAIN-TEST SPLIT (80-20)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, 
+        test_size=0.2,  # 20% for testing
+        train_size=0.8,  # 80% for training
+        stratify=y,      # Maintain class distribution
+        random_state=42
+    )
+    
+    # Store split information for visualization
+    split_info = {
+        'Total Samples': len(df),
+        'Training Samples': X_train.shape[0],
+        'Test Samples': X_test.shape[0],
+        'Training %': 80,
+        'Test %': 20
+    }
+    
+    # Models to train
     models = {
         'Naive Bayes': MultinomialNB(),
-        'Logistic Regression': LogisticRegression(),
-        'SVM (Calibrated)': CalibratedClassifierCV(LinearSVC(random_state=42))
+        'Logistic Regression': LogisticRegression(max_iter=1000, random_state=42),
+        'SVM (Calibrated)': CalibratedClassifierCV(LinearSVC(random_state=42, max_iter=2000))
     }
-
+    
     trained_models = {}
-    metrics = []
-    cms = {}
-
+    test_metrics = []
+    confusion_matrices = {}
+    
     for name, model in models.items():
+        # Train model
         model.fit(X_train, y_train)
         trained_models[name] = model
-        y_pred = model.predict(X_test)
-        cms[name] = confusion_matrix(y_test, y_pred)
-        metrics.append({
-            'Model': name, 'Accuracy': accuracy_score(y_test, y_pred),
-            'Precision': precision_score(y_test, y_pred), 'Recall': recall_score(y_test, y_pred),
-            'F1-Score': f1_score(y_test, y_pred)
+        
+        # Predictions on test set only
+        y_test_pred = model.predict(X_test)
+        
+        # Store confusion matrices for test set
+        confusion_matrices[name] = confusion_matrix(y_test, y_test_pred)
+        
+        # Test metrics only
+        test_metrics.append({
+            'Model': name,
+            'Accuracy': accuracy_score(y_test, y_test_pred),
+            'Precision': precision_score(y_test, y_test_pred),
+            'Recall': recall_score(y_test, y_test_pred),
+            'F1-Score': f1_score(y_test, y_test_pred)
         })
-    return tfidf, trained_models, pd.DataFrame(metrics), df, cms
+    
+    # Create metrics dataframe
+    metrics_df = pd.DataFrame(test_metrics)
+    
+    return tfidf, trained_models, metrics_df, df, confusion_matrices, split_info
 
-tfidf, trained_models, metrics_df, original_df, confusion_matrices = load_and_train()
+# Load and train models
+tfidf, trained_models, metrics_df, original_df, confusion_matrices, split_info = load_and_train()
 
 # --- 2. PDF GENERATOR FUNCTION ---
 def create_pdf_report(filename, total, spam_count, ham_count, conclusion):
@@ -154,43 +188,157 @@ with tab2:
         st.dataframe(pd.DataFrame({"Message": [l for l in content if l.strip()], "Result": batch_results}), use_container_width=True)
 
 with tab3:
-    st.subheader("Deep Model Analytics")
+    st.subheader("Model Performance Analytics - Test Set Results")
     
-    # 1. Performance Comparison Bar Chart
-    st.markdown("#### Comprehensive Performance Comparison")
-    fig_metrics, ax_metrics = plt.subplots(figsize=(10, 4))
+    # 1. TRAIN-TEST SPLIT INFORMATION
+    st.markdown("#### 📊 Dataset Split (80% Train, 20% Test)")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Samples", split_info['Total Samples'])
+    with col2:
+        st.metric("Training Set", f"{split_info['Training Samples']} ({split_info['Training %']}%)")
+    with col3:
+        st.metric("Test Set", f"{split_info['Test Samples']} ({split_info['Test %']}%)")
+    
+    st.markdown("---")
+    
+    # 2. MODEL PERFORMANCE BAR CHART (TEST SET ONLY)
+    st.markdown("#### 🎯 Model Performance on Test Set")
+    
+    # Create bar chart for test set metrics
+    fig_bar, ax_bar = plt.subplots(figsize=(10, 5))
     plt.style.use('dark_background')
-    melted = metrics_df.melt(id_vars='Model')
-    sns.barplot(data=melted, x='variable', y='value', hue='Model', palette='viridis')
-    plt.ylim(0.8, 1.05)
-    st.pyplot(fig_metrics)
+    
+    x = np.arange(len(metrics_df['Model']))
+    width = 0.2
+    
+    # Plot bars for each metric
+    ax_bar.bar(x - width*1.5, metrics_df['Accuracy'], width, label='Accuracy', color='#03DAC6')
+    ax_bar.bar(x - width/2, metrics_df['Precision'], width, label='Precision', color='#BB86FC')
+    ax_bar.bar(x + width/2, metrics_df['Recall'], width, label='Recall', color='#FFB74D')
+    ax_bar.bar(x + width*1.5, metrics_df['F1-Score'], width, label='F1-Score', color='#EF5350')
+    
+    ax_bar.set_xlabel('Models')
+    ax_bar.set_ylabel('Score')
+    ax_bar.set_title('Model Performance Comparison on Test Set', fontsize=13, pad=15)
+    ax_bar.set_xticks(x)
+    ax_bar.set_xticklabels(metrics_df['Model'], rotation=15, ha='right')
+    ax_bar.legend(loc='lower right')
+    ax_bar.set_ylim(0, 1.05)
+    ax_bar.grid(True, alpha=0.3, linestyle='--')
+    plt.tight_layout()
+    st.pyplot(fig_bar)
+    
+    st.markdown("---")
+    
+    # 3. PERFORMANCE METRICS TABLE (TEST SET ONLY)
+    st.markdown("#### 📋 Detailed Performance Metrics (Test Set)")
+    
+    # Add ranking column
+    metrics_display = metrics_df.copy()
+    metrics_display['Accuracy'] = metrics_display['Accuracy'].apply(lambda x: f"{x:.4f}")
+    metrics_display['Precision'] = metrics_display['Precision'].apply(lambda x: f"{x:.4f}")
+    metrics_display['Recall'] = metrics_display['Recall'].apply(lambda x: f"{x:.4f}")
+    metrics_display['F1-Score'] = metrics_display['F1-Score'].apply(lambda x: f"{x:.4f}")
+    
+    # Highlight best model
+    st.dataframe(metrics_display, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # 4. BEST MODEL RECOMMENDATION
+    st.markdown("#### 🏆 Best Model Recommendation")
+    
+    # Find best model based on test accuracy
+    best_model = metrics_df.loc[metrics_df['Accuracy'].idxmax(), 'Model']
+    best_accuracy = metrics_df['Accuracy'].max()
+    best_f1 = metrics_df.loc[metrics_df['Accuracy'].idxmax(), 'F1-Score']
+    
+    st.success(f"""
+    **🏆 {best_model}** is the best performing model!
+    - **Accuracy**: {best_accuracy:.2%}
+    - **F1-Score**: {best_f1:.4f}
+    - **Test Set Size**: {split_info['Test Samples']} samples
+    """)
+    
+    st.markdown("---")
+    
+    # 5. CONFUSION MATRICES SIDE BY SIDE (TEST SET ONLY)
+    st.markdown("#### 🔍 Confusion Matrices")
+    
+    # Display confusion matrices in a grid (3 in a row)
+    model_names = list(confusion_matrices.keys())
+    
+    # Create 3 columns for the 3 models
+    cols = st.columns(3)
+    
+    for idx, (col, model_name) in enumerate(zip(cols, model_names)):
+        with col:
+            st.markdown(f"**{model_name}**")
+            fig_cm, ax_cm = plt.subplots(figsize=(4, 4))
+            
+            # Choose colormap based on model
+            cmap = 'Greens' if model_name == 'Naive Bayes' else ('Blues' if model_name == 'Logistic Regression' else 'Purples')
+            
+            sns.heatmap(confusion_matrices[model_name], annot=True, fmt='d', 
+                       cmap=cmap, cbar=False, ax=ax_cm,
+                       annot_kws={'size': 12})
+            
+            # ax_cm.set_title(f"Test Set", fontsize=10, pad=10)
+            ax_cm.set_xlabel("Predicted", fontsize=9)
+            ax_cm.set_ylabel("Actual", fontsize=9)
+            
+            # Set tick labels
+            ax_cm.set_xticklabels(['HAM', 'SPAM'], fontsize=8)
+            ax_cm.set_yticklabels(['HAM', 'SPAM'], fontsize=8)
+            
+            plt.tight_layout()
+            st.pyplot(fig_cm)
+            
+            # Calculate and display basic metrics from confusion matrix
+            cm = confusion_matrices[model_name]
+            tn, fp, fn, tp = cm.ravel()
+            
+            col_metric1, col_metric2 = st.columns(2)
+            with col_metric1:
+                st.metric("True Negatives", tn)
+                st.metric("False Positives", fp)
+            with col_metric2:
+                st.metric("True Positives", tp)
+                st.metric("False Negatives", fn)
+    
+    st.markdown("---")
+    
 
-    # 2. Dataset Distribution Pie Chart (RESIZED TO BE SMALLER)
-    st.markdown("#### Dataset Label Distribution")
-    fig_pie, ax_pie = plt.subplots(figsize=(3, 3)) # Reduced size from 6x6 to 3x3
+    
+    # 7. ORIGINAL DATASET DISTRIBUTION
+    st.markdown("#### 📊 Original Dataset Distribution")
+    
+    fig_pie, ax_pie = plt.subplots(figsize=(5, 5))
     plt.style.use('dark_background')
-    original_df['label'].value_counts().plot(
-        kind='pie', 
-        autopct='%1.1f%%', 
-        colors=['#03DAC6', '#BB86FC'], 
-        explode=[0.05, 0.05], 
-        startangle=90, 
-        ax=ax_pie,
-        textprops={'color':"w", 'fontsize': 8} # Smaller font for smaller chart
-    )
+    
+    # Create pie chart
+    counts = original_df['label'].value_counts()
+    colors_pie = ['#03DAC6', '#BB86FC']
+    explode = [0.05, 0.05]
+    
+    wedges, texts, autotexts = ax_pie.pie(counts, labels=counts.index, autopct='%1.1f%%',
+                                          colors=colors_pie, explode=explode, 
+                                          startangle=90, textprops={'fontsize': 11})
+    
+    # Style the text
+    for text in texts:
+        text.set_color('white')
+    for autotext in autotexts:
+        autotext.set_color('white')
+        autotext.set_fontweight('bold')
+    
+    ax_pie.set_title('Full Dataset Label Distribution', fontsize=13, pad=20, color='white')
     ax_pie.set_ylabel('')
     fig_pie.patch.set_facecolor('#1E1E1E')
+    ax_pie.legend(wedges, [f'HAM: {counts["ham"]}', f'SPAM: {counts["spam"]}'],
+                 title="Classes", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
+    
     plt.tight_layout()
     st.pyplot(fig_pie)
-
-    # 3. Confusion Matrix Gallery
-    st.markdown("#### Confusion Matrices (Error Analysis)")
-    cols = st.columns(3)
-    for i, name in enumerate(confusion_matrices.keys()):
-        with cols[i]:
-            fig_cm, ax_cm = plt.subplots(figsize=(4, 4))
-            sns.heatmap(confusion_matrices[name], annot=True, fmt='d', cmap='Purples', cbar=False)
-            ax_cm.set_title(f"{name}", fontsize=10)
-            ax_cm.set_xlabel("Predicted", fontsize=8)
-            ax_cm.set_ylabel("Actual", fontsize=8)
-            st.pyplot(fig_cm)
